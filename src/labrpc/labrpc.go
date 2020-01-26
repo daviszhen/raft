@@ -215,8 +215,9 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
-
+	
 	if enabled && servername != nil && server != nil {
+//		log.Printf("processReq A %s",req.svcMeth)
 		if reliable == false {
 			// short delay
 			ms := (rand.Int() % 27)
@@ -226,6 +227,7 @@ func (rn *Network) processReq(req reqMsg) {
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
+//			log.Printf("processReq A %s done 1",req.svcMeth)
 			return
 		}
 
@@ -246,15 +248,20 @@ func (rn *Network) processReq(req reqMsg) {
 		replyOK := false
 		serverDead := false
 		for replyOK == false && serverDead == false {
+			//log.Printf("processReq B %s",req.svcMeth)
 			select {
 			case reply = <-ech:
 				replyOK = true
+			//	log.Printf("processReq B %s get reply",req.svcMeth)
 			case <-time.After(100 * time.Millisecond):
 				serverDead = rn.isServerDead(req.endname, servername, server)
 				if serverDead {
+			//		log.Printf("processReq B %s isdead",req.svcMeth)
 					go func() {
 						<-ech // drain channel to let the goroutine created earlier terminate
 					}()
+				}else{
+			//		log.Printf("processReq B %s not dead",req.svcMeth)
 				}
 			}
 		}
@@ -269,23 +276,31 @@ func (rn *Network) processReq(req reqMsg) {
 
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
+		//	log.Printf("processReq A %s done 2-",req.svcMeth)
 			req.replyCh <- replyMsg{false, nil}
+		//	log.Printf("processReq A %s done 2",req.svcMeth)
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
+		//	log.Printf("processReq A %s done 3-",req.svcMeth)
 			req.replyCh <- replyMsg{false, nil}
+		//	log.Printf("processReq A %s done 3",req.svcMeth)
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
 			ms := 200 + rand.Intn(1+rand.Intn(2000))
 			// Russ points out that this timer arrangement will decrease
 			// the number of goroutines, so that the race
 			// detector is less likely to get upset.
+		//	log.Printf("processReq A %s done 4-",req.svcMeth)
 			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
 				atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
 				req.replyCh <- reply
 			})
+		//	log.Printf("processReq A %s done 4",req.svcMeth)
 		} else {
 			atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
+		//	log.Printf("processReq A %s done 5-",req.svcMeth)
 			req.replyCh <- reply
+		//	log.Printf("processReq A %s done 5",req.svcMeth)
 		}
 	} else {
 		// simulate no reply and eventual timeout.
@@ -299,9 +314,11 @@ func (rn *Network) processReq(req reqMsg) {
 			// server in fairly rapid succession.
 			ms = (rand.Int() % 100)
 		}
+		//log.Printf("processReq C %s ms: %d",req.svcMeth,ms)
 		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
 			req.replyCh <- replyMsg{false, nil}
 		})
+		//log.Printf("processReq C %s ms: %d done",req.svcMeth,ms)
 	}
 
 }
