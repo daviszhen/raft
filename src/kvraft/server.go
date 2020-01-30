@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bytes"
 )
 
 const Debug = 0
@@ -74,14 +75,37 @@ type KVServer struct {
 	raftPersister *raft.Persister          // Object to hold this peer's persisted state
 }
 
-func (kv *KVServer) InitKVServer() {
+func Max(x, y int) int {
+	if x < y {
+		return y
+	}
+	return x
+}
+
+func Min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+func (kv *KVServer) InitKVServer(persister *raft.Persister) {
+	DPrintf("InitKVServer")
 	atomic.StoreInt32(&kv.dead, 0)
 	kv.wait = make(map[int]*list.List)
 	kv.lastReqNumber = make(map[int]int)
 	kv.data	= make(map[string]string)
 	//1000,3000，4000不能过 ，5000大部分能过，10000能过
 	kv.rpcTimeout = 10000
+
+	//load persisted data
+	kv.raftPersister = persister
+	kv.DecSnapshot(persister.ReadSnapshot())
+}
+
+func (kv *KVServer) EnableKVServer(){
 	go kv.ApplyStateMachineRoutine()
+	go kv.SnapshotRoutine()
 	go kv.RpcTimeoutTimer()
 }
 
@@ -91,7 +115,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	cmd := Op{args.Client,args.ReqNumber,GET,args.Key,""}
 	//DPrintf("Get call raft")
 	index,term,isLeader := kv.rf.Start(cmd)
-	//DPrintf("Get call raft done %d %d ",index,term)
+	DPrintf("Get call raft done %d %d ",index,term)
 	if isLeader == false || index == -1 || term == -1{
 		reply.Err = ErrWrongLeader
 		return
@@ -135,7 +159,7 @@ func (kv *KVServer)  PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
  
 	//DPrintf("PutAppend call raft")
 	index,term,isLeader := kv.rf.Start(cmd)
-	//DPrintf("PutAppend call raft done %d %d",index,term)
+	DPrintf("PutAppend call raft done %d %d",index,term)
 
 	if isLeader == false || index == -1 || term == -1{
 		reply.Err = ErrWrongLeader
@@ -211,100 +235,133 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 		if !ok{ 
 			break 
 		} 
-		//DPrintf("%d applied msg",kv.me)
-		kv.mu.Lock()
-		//notify all previous index
-		for i:=0;i<msg.CommandIndex;i++{
-			prevList,ok := kv.wait[i]
-			if !ok{
-				delete(kv.wait,i)
-				continue
-			}
-			for e := prevList.Front();e!= nil;e=e.Next(){
-				W := e.Value.(*LogGroup)
-				kv.DoReply(W,Outdated)
-			}
-			for prevList.Len() > 0{
-				prevList.Remove(prevList.Front())
-			}
-			delete(kv.wait,i)
-		}
-
-		waitList,ok := kv.wait[msg.CommandIndex]
-		if !ok{
-			//DPrintf("wai list is null")
-			waitList=nil
-		}
-		var finalWait *LogGroup = nil
-		if waitList != nil{ 
-			for e := waitList.Front();e!= nil;e=e.Next(){
-				W := e.Value.(*LogGroup)
-				if W.index != msg.CommandIndex || W.term != msg.CommandTerm {
-					kv.DoReply(W,LogChanged)
-				}else{ 
-					if  finalWait != nil{
-						DPrintf("more than two client,wait on the same index")
-						kv.DoReply(finalWait,ClientsOnSameIndex)
+		if msg.CommandValid {
+			DPrintf("%d applied msg index %d term %d",kv.me,msg.CommandIndex,msg.CommandTerm)
+			kv.mu.Lock()
+			if msg.CommandIndex > kv.lastAppliedIndex {
+				//notify all previous index
+				for i:=0;i<msg.CommandIndex;i++{
+					prevList,ok := kv.wait[i]
+					if !ok{
+						delete(kv.wait,i)
+						continue
 					}
-					finalWait = W;
+					for e := prevList.Front();e!= nil;e=e.Next(){
+						W := e.Value.(*LogGroup)
+						kv.DoReply(W,Outdated)
+					}
+					for prevList.Len() > 0{
+						prevList.Remove(prevList.Front())
+					}
+					delete(kv.wait,i)
 				}
-			} 
-	
-			for  waitList.Len() > 0{
-				waitList.Remove(waitList.Front())
-			}	
-		}
- 
-		cmd := msg.Command.(Op)
-		prevReqNumber,ok := kv.lastReqNumber[cmd.Client]
-		if !ok{ 
-			prevReqNumber = -1 
-		}  
-  
-		var dup bool = false
-		// cmd去 重
-		if cmd.ReqNumber <= prevReqNumber{
-			dup = true
-		} else {
-			kv.lastReqNumber[cmd .Client] = cmd.ReqNumber
-		} 
-		kv.mu.Unlock()
-		DPrintf("%d apply msg :client %d reqNo %d optype %d key %s value %s",
-			kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
-		if dup{ 
-			if  cmd .OpType == GET {
-				value,ok := kv.data[cmd.Key ] 
+
+				waitList,ok := kv.wait[msg.CommandIndex]
 				if !ok{
-				 	kv.DoReply(finalWait,ErrNoKey)
-				}else{
-					kv.DoReplyValue(finalWait,OK,value)
-				 } 
-			}else{ 
-				kv.DoReply(finalWait,Duplicate)
-			}
-		}else{ 
-			if  cmd .OpType == GET{
-				value,ok := kv.data[cmd.Key]
+					//DPrintf("wai list is null")
+					waitList=nil
+				}
+				var finalWait *LogGroup = nil
+				if waitList != nil{ 
+					for e := waitList.Front();e!= nil;e=e.Next(){
+						W := e.Value.(*LogGroup)
+						if W.index != msg.CommandIndex || W.term != msg.CommandTerm {
+							kv.DoReply(W,LogChanged)
+						}else{ 
+							if  finalWait != nil{
+								DPrintf("more than two client,wait on the same index")
+								kv.DoReply(finalWait,ClientsOnSameIndex)
+							}
+							finalWait = W;
+						}
+					} 
+			
+					for  waitList.Len() > 0{
+						waitList.Remove(waitList.Front())
+					}	
+				}
+		
+				cmd := msg.Command.(Op)
+				prevReqNumber,ok := kv.lastReqNumber[cmd.Client]
 				if !ok{ 
-					kv.DoReply(finalWait,ErrNoKey)
-				}else{
-					kv.DoReplyValue(finalWait,OK,value)
+					prevReqNumber = -1 
 				}
-			}else if cmd.OpType == PUT{
-				kv.data[cmd.Key] = cmd.Value
-				kv.DoReply(finalWait,OK)
-			}else if cmd.OpType == APPEND{
-				value,ok := kv.data[cmd.Key]
-				if !ok{
-					kv.data[cmd.Key] = cmd.Value
-					kv.DoReply(finalWait,OK)
-				}else{
-					kv.data[cmd.Key] = value + cmd.Value
-					kv.DoReply(finalWait,OK)
+				var dup bool = false
+				// cmd去 重
+				if cmd.ReqNumber <= prevReqNumber{
+					dup = true
+				} else {
+					kv.lastReqNumber[cmd .Client] = cmd.ReqNumber
 				}
+
+				kv.lastAppliedIndex = msg.CommandIndex
+				kv.lastAppliedTerm = msg.CommandTerm
+
+				if dup { 
+					DPrintf("%d Dup apply msg :client %d reqNo %d optype %d key %s value %s",
+					kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
+					if  cmd .OpType == GET {
+						value,ok := kv.data[cmd.Key ] 
+						if !ok{
+							kv.DoReply(finalWait,ErrNoKey)
+						}else{
+							kv.DoReplyValue(finalWait,OK,value)
+						} 
+					}else{ 
+						kv.DoReply(finalWait,Duplicate)
+					}
+				}else{ 
+					DPrintf("%d apply msg :client %d reqNo %d optype %d key %s value %s",
+					kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
+					if  cmd .OpType == GET{
+						value,ok := kv.data[cmd.Key]
+						if !ok{ 
+							kv.DoReply(finalWait,ErrNoKey)
+						}else{
+							kv.DoReplyValue(finalWait,OK,value)
+						}
+					}else if cmd.OpType == PUT{
+						kv.data[cmd.Key] = cmd.Value
+						kv.DoReply(finalWait,OK)
+					}else if cmd.OpType == APPEND{
+						value,ok := kv.data[cmd.Key]
+						if !ok{
+							kv.data[cmd.Key] = cmd.Value
+							kv.DoReply(finalWait,OK)
+						}else{
+							kv.data[cmd.Key] = value + cmd.Value
+							kv.DoReply(finalWait,OK)
+						}
+					}
+				}
+			}else{
+				//notify all previous index
+				for i:=0;i <= kv.lastAppliedIndex;i++{
+					prevList,ok := kv.wait[i]
+					if !ok{
+						delete(kv.wait,i)
+						continue
+					}
+					for e := prevList.Front();e!= nil;e=e.Next(){
+						W := e.Value.(*LogGroup)
+						kv.DoReply(W,Outdated)
+					}
+					for prevList.Len() > 0{
+						prevList.Remove(prevList.Front())
+					}
+					delete(kv.wait,i)
+				}
+
+				DPrintf("%d Drop apply msg",kv.me)
 			}
+			kv.mu.Unlock() 
+		}else{
+			//TODO: update the lastest snapshot from leader
+			kv.mu.Lock()
+			kv.DecSnapshot(msg.Command.([]byte))
+			kv.mu.Unlock()
 		}
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -330,6 +387,77 @@ func (kv *KVServer) RpcTimeoutTimer() {
 		kv.mu.Unlock()
 	}
 	DPrintf("RpcTimeoutTimer Done")
+}
+
+func (kv *KVServer) GenSnapshot()[]byte{
+	writer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writer)
+	encoder.Encode(kv.lastReqNumber)
+	encoder.Encode(kv.data)
+	encoder.Encode(kv.lastAppliedIndex)
+	encoder.Encode(kv.lastAppliedTerm)
+	return writer.Bytes()
+}
+
+//
+// restore previously generated snapshot.
+//
+func (kv *KVServer) DecSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		DPrintf("DecSnapshot: data is null")
+		return
+	}
+	// Your code here (2C).
+	// Example:
+	// r := bytes.NewBuffer(data)
+	// d := labgob.NewDecoder(r)
+	// var xxx
+	// var yyy
+	// if d.Decode(&xxx) != nil ||
+	//    d.Decode(&yyy) != nil {
+	//   error...
+	// } else {
+	//   rf.xxx = xxx
+	//   rf.yyy = yyy
+	// }
+	reader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(reader)
+	var lastReqNumber map[int]int
+	var stateMachine          map[string]string
+	var lastAppliedIndex int
+	var lastAppliedTerm int
+	if decoder.Decode(&lastReqNumber) != nil || 
+			decoder.Decode(&stateMachine) != nil || 
+			decoder.Decode(&lastAppliedIndex) != nil ||
+			decoder.Decode(&lastAppliedTerm) != nil {
+		DPrintf("Decode Snapshot failed")
+	} else {
+		kv.lastReqNumber = lastReqNumber
+		kv.data = stateMachine
+		kv.lastAppliedIndex = lastAppliedIndex
+		kv.lastAppliedTerm = lastAppliedTerm
+	}
+	DPrintf("DecSnapshot Done snapdata addr %p",data)
+}
+
+func (kv *KVServer) SnapshotRoutine() {
+	for atomic.LoadInt32(&kv.dead) == 0 {
+		//DPrintf("SnapshotRoutine running")
+		kv.mu.Lock()
+		if kv.maxraftstate > 0 && kv.raftPersister.RaftStateSize() >= (kv.maxraftstate * 7) / 10 {
+			//encode snapshot
+			snapshot := raft.Snapshot{kv.GenSnapshot(),kv.lastAppliedIndex,kv.lastAppliedTerm}
+			DPrintf("%d kvServer snapdata addr %p",kv.me,snapshot.SnapshotData)
+			kv.mu.Unlock()	
+			//require Raft to install snapshot
+			kv.rf.AddSnapshot(snapshot)
+		}else{
+			kv.mu.Unlock()
+		}
+		
+		time.Sleep(10 * time.Millisecond)
+	}
+	DPrintf("SnapshotRoutine Done")
 }
 
 //
@@ -377,14 +505,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.raftPersister = persister
-	
+	kv.InitKVServer(persister)
+
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.InitKVServer()
+	kv.EnableKVServer()
 	kv.mu.Lock()
+	
 	kv.mu.Unlock()
 	return kv
 }
