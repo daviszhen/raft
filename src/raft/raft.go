@@ -99,6 +99,7 @@ type Raft struct {
 	LastIncludedIndex int
 	LastIncludedTerm int
 	currentSnapshot Snapshot
+	snapshotChanged bool
 
 	//others
 	role    int
@@ -215,11 +216,6 @@ type Raft struct {
 	applyMsgs         *list.List
 	applyMsgMutex     sync.Mutex
 	applyMsgCondition *sync.Cond
-
-	//routine sleep time out
-	mainRoutineSleep int
-	applyRoutineSleep int
-	persistRoutineSleep int
 }
 
 func (rf *Raft) InitRaft(peerCnt int) {
@@ -239,6 +235,8 @@ func (rf *Raft) InitRaft(peerCnt int) {
 
 	rf.LastIncludedIndex = -1
 	rf.LastIncludedTerm = -1
+
+	rf.snapshotChanged = false
 
 	rf.role = Follower
 	/*
@@ -336,8 +334,9 @@ func (rf *Raft) InitRaft(peerCnt int) {
 	rf.applyMsgCondition = sync.NewCond(&rf.applyMsgMutex)
 
 	DPrintf("Init ElectionTimer. electionTimeoutBegin %d", rf.electionTimeoutBegin)
+}
 
-
+func (rf *Raft) EnableRaft(peerCnt int) {
 	go rf.ElectionTimer()
 	go rf.HeartbeatTimer()
 
@@ -355,7 +354,7 @@ func (rf *Raft) InitRaft(peerCnt int) {
 
 	go rf.PersistStateRoutine()
 	go rf.ApplyMsgRoutine()
-	go rf.PeerMainRoutine()
+	go rf.PeerMainRoutine()	
 }
 
 func (rf *Raft) LogLength()int{
@@ -682,7 +681,8 @@ func (rf *Raft) FollowerRoutine() bool {
 				}
 				if req.args.LeaderCommit > rf.commitIndex {
 					prevCommitIndex := rf.commitIndex
-					rf.commitIndex = Min(req.args.LeaderCommit, indexOfLastNewEntry)
+					nextCommitIndex := Min(req.args.LeaderCommit, indexOfLastNewEntry)
+					rf.commitIndex = Max(rf.commitIndex,nextCommitIndex)
 					if rf.commitIndex < prevCommitIndex {
 						//log.Printf("%d Follower {PrevLogIndex %d LastIncludedIndex %d}commit decrease from %d to %d ",rf.me,req.args.PrevLogIndex, rf.LastIncludedIndex,prevCommitIndex,rf.commitIndex)
 					}
@@ -735,7 +735,8 @@ func (rf *Raft) FollowerRoutine() bool {
 				}
 				if req.args.LeaderCommit > rf.commitIndex {
 					prevCommitIndex := rf.commitIndex
-					rf.commitIndex = Min(req.args.LeaderCommit, indexOfLastNewEntry)
+					nextCommitIndex := Min(req.args.LeaderCommit, indexOfLastNewEntry)
+					rf.commitIndex = Max(rf.commitIndex,nextCommitIndex)
 					if rf.commitIndex < prevCommitIndex {
 						//log.Printf("%d Follower commit decrease from %d to %d ",rf.me,prevCommitIndex,rf.commitIndex)
 					}
@@ -829,8 +830,9 @@ func (rf *Raft) FollowerRoutine() bool {
 					rf.me,rf.LastIncludedIndex,rf.LastIncludedTerm,rf.commitIndex,rf.lastApplied,rf.LogLength()-1)
 
 				//在这里持久化，不是好办法
-				//rf.persist()
-				//rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
+				rf.currentSnapshot.SnapshotData = req.args.Data
+				rf.persist()
+				rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),req.args.Data)
 
 				//将来自leader的状态机数据传给kvserver。
 				msg := new(ApplyMsg)
@@ -882,7 +884,7 @@ func (rf *Raft) FollowerRoutine() bool {
 	if rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
 		//Apply State.log[State.lastApplied] to state machine;
-		DPrintf("{%d term %d} LastIncludedIndex %d lastApplied %d commitIndex %d",
+		DPrintf("{%d term %d} Follower apply LastIncludedIndex %d lastApplied %d commitIndex %d",
 			rf.me,rf.CurrentTerm,rf.LastIncludedIndex,rf.lastApplied,rf.commitIndex)
 		msg := new(ApplyMsg)
 		msg.CommandValid = true
@@ -919,6 +921,7 @@ func (rf *Raft) FollowerRoutine() bool {
 			rf.currentSnapshot = snap
 			rf.persist()
 			rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
+			rf.snapshotChanged = true
 			DPrintf("%d raft addr %p raft size {%d -> %d},snapdata addr %p",rf.me,rf.persister.ReadRaftState(),prevRaftSize,rf.persister.RaftStateSize(),snap.SnapshotData)
 		}else{
 			DPrintf("%d Follower Drop snapshot LastAppliedIndex %d rf.LastIncludedIndex %d",rf.me,snap.LastAppliedIndex,rf.LastIncludedIndex)
@@ -1145,6 +1148,8 @@ func (rf *Raft) CandidateRoutine() bool {
 	if rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
 		//Apply State.log[State.lastApplied] to state machine;
+		DPrintf("{%d term %d} Candidate apply LastIncludedIndex %d lastApplied %d commitIndex %d",
+			rf.me,rf.CurrentTerm,rf.LastIncludedIndex,rf.lastApplied,rf.commitIndex)
 		msg := new(ApplyMsg)
 		msg.CommandValid = true
 		msg.Command = rf.LogAt(rf.lastApplied).Command
@@ -1180,6 +1185,7 @@ func (rf *Raft) CandidateRoutine() bool {
 			rf.currentSnapshot = snap
 			rf.persist()
 			rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
+			rf.snapshotChanged = true
 			DPrintf("%d raft addr %p raft size {%d -> %d},snapdata addr %p",rf.me,rf.persister.ReadRaftState(),prevRaftSize,rf.persister.RaftStateSize(),snap.SnapshotData)
 		}else{
 			DPrintf("%d Candidate Drop snapshot LastAppliedIndex %d rf.LastIncludedIndex %d",rf.me,snap.LastAppliedIndex,rf.LastIncludedIndex)
@@ -1369,7 +1375,7 @@ func (rf *Raft) LeaderRoutine() bool {
 		} else {
 
 			//Decement State.nextIndex[A follower] and retry;
-			prev := rf.nextIndex[rep.peer]
+			//prev := rf.nextIndex[rep.peer]
 			next := rf.nextIndex[rep.peer]
 			if rep.reply.ConflictTerm != -1 {
 				i := rep.args.PrevLogIndex
@@ -1394,9 +1400,9 @@ func (rf *Raft) LeaderRoutine() bool {
 			next = Min(next, rf.nextIndex[rep.peer])
 			rf.nextIndex[rep.peer] = Max(1, next)
 			
-			DPrintf("DDD from {%d Term %d} to {%d Term %d} number %d , nextIndex[%d] backup from %d to %d ",
-				rep.peer,rep.reply.Term,rf.me,rf.CurrentTerm,
-				rep.args.Number, rep.peer, prev, rf.nextIndex[rep.peer])
+			//DPrintf("DDD from {%d Term %d} to {%d Term %d} number %d , nextIndex[%d] backup from %d to %d ",
+			//	rep.peer,rep.reply.Term,rf.me,rf.CurrentTerm,
+			//	rep.args.Number, rep.peer, prev, rf.nextIndex[rep.peer])
 			
 			rf.aeReplies.Remove(rf.aeReplies.Front())
 		}
@@ -1554,6 +1560,8 @@ func (rf *Raft) LeaderRoutine() bool {
 	if rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
 		//Apply State.log[State.lastApplied] to state machine;
+		DPrintf("{%d term %d} Leader apply LastIncludedIndex %d lastApplied %d commitIndex %d",
+			rf.me,rf.CurrentTerm,rf.LastIncludedIndex,rf.lastApplied,rf.commitIndex)
 		msg := new(ApplyMsg)
 		msg.CommandValid = true
 		msg.Command = rf.LogAt(rf.lastApplied).Command
@@ -1590,6 +1598,7 @@ func (rf *Raft) LeaderRoutine() bool {
 			rf.currentSnapshot = snap
 			rf.persist()
 			rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
+			rf.snapshotChanged = true
 			DPrintf("%d raft addr %p raft size {%d -> %d},snapdata addr %p",rf.me,rf.persister.ReadRaftState(),prevRaftSize,rf.persister.RaftStateSize(),snap.SnapshotData)
 		}else{
 			DPrintf("%d Leader Drop snapshot LastAppliedIndex %d rf.LastIncludedIndex %d",rf.me,snap.LastAppliedIndex,rf.LastIncludedIndex)
@@ -1748,12 +1757,18 @@ func (rf *Raft) ApplyMsgRoutine() {
 		msg := rf.applyMsgs.Front().Value.(*ApplyMsg)
 		rf.applyMsgs.Remove(rf.applyMsgs.Front())
 		rf.applyMsgMutex.Unlock()
-		if msg.CommandIndex > rf.LastIncludedIndex{
-			rf.applyCh <- *msg
-			DPrintf("%d apply Entry[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
+		if msg.CommandValid{
+			if msg.CommandIndex > rf.LastIncludedIndex{
+				rf.applyCh <- *msg
+				DPrintf("%d apply Entry[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
+			}else{
+				DPrintf("%d drop apllied msg CommandIndex %d LastIncludedIndex %d",rf.me,msg.CommandIndex,rf.LastIncludedIndex)
+			}
 		}else{
-			DPrintf("%d drop apllied msg CommandIndex %d LastIncludedIndex %d",rf.me,msg.CommandIndex,rf.LastIncludedIndex)
+			rf.applyCh <- *msg
+			DPrintf("%d apply Snapshot[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
 		}
+		
 		time.Sleep(1 * time.Millisecond)
 	}
 }
@@ -1858,7 +1873,7 @@ func (rf *Raft) PersistStateRoutine() {
 
 	for atomic.LoadInt32(&rf.dead) == 0 {
 		rf.Lock()
-		if rf.StatesAreUpdated(prevCurrentTerm, prevVotedFor, prevLastIncludedIndex,prevLastIncludedTerm,prevLog) {
+		if rf.snapshotChanged || rf.StatesAreUpdated(prevCurrentTerm, prevVotedFor, prevLastIncludedIndex,prevLastIncludedTerm,prevLog) {
 			//copy states out
 			prevCurrentTerm = rf.CurrentTerm
 			prevVotedFor = rf.VotedFor
@@ -1868,6 +1883,9 @@ func (rf *Raft) PersistStateRoutine() {
 			copy(prevLog, rf.Log)
 			rf.persist()
 			rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),rf.currentSnapshot.SnapshotData)
+			if rf.snapshotChanged {
+				rf.snapshotChanged = false
+			}
 		}
 		rf.Unlock()
 
@@ -2097,6 +2115,7 @@ func (rf *Raft) Kill() {
 	DPrintf("Kill Raft")
 	rf.Lock()
 	rf.persist()
+	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),rf.currentSnapshot.SnapshotData)
 	rf.Unlock()
 	rf.DestroyRaft()
 }
@@ -2132,5 +2151,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.Lock()
 	rf.readPersist(persister.ReadRaftState())
 	rf.Unlock()
+
+	rf.EnableRaft(len(peers))
 	return rf
 }

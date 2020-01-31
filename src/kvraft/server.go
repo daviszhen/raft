@@ -96,11 +96,14 @@ func (kv *KVServer) InitKVServer(persister *raft.Persister) {
 	kv.lastReqNumber = make(map[int]int)
 	kv.data	= make(map[string]string)
 	//1000,3000，4000不能过 ，5000大部分能过，10000能过
-	kv.rpcTimeout = 10000
+	kv.rpcTimeout = 5000
 
 	//load persisted data
 	kv.raftPersister = persister
 	kv.DecSnapshot(persister.ReadSnapshot())
+	for key,value := range kv.data{
+		DPrintf("InInitKVServer %d key %s value [%s]",kv.me,key,value)
+	}
 }
 
 func (kv *KVServer) EnableKVServer(){
@@ -298,8 +301,8 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 				kv.lastAppliedTerm = msg.CommandTerm
 
 				if dup { 
-					DPrintf("%d Dup apply msg :client %d reqNo %d optype %d key %s value %s",
-					kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
+					DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value %s",
+					kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
 					if  cmd .OpType == GET {
 						value,ok := kv.data[cmd.Key ] 
 						if !ok{
@@ -310,9 +313,7 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 					}else{ 
 						kv.DoReply(finalWait,Duplicate)
 					}
-				}else{ 
-					DPrintf("%d apply msg :client %d reqNo %d optype %d key %s value %s",
-					kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
+				}else{
 					if  cmd .OpType == GET{
 						value,ok := kv.data[cmd.Key]
 						if !ok{ 
@@ -333,6 +334,8 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 							kv.DoReply(finalWait,OK)
 						}
 					}
+					DPrintf("%d apply msg :client %d reqNo %d optype %d key %s value %s dbValue[%s]",
+					kv.me,cmd.Client,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value,kv.data[cmd.Key])
 				}
 			}else{
 				//notify all previous index
@@ -358,7 +361,17 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 		}else{
 			//TODO: update the lastest snapshot from leader
 			kv.mu.Lock()
+			for _,waitList := range kv.wait{
+				for e := waitList.Front();e!= nil;{
+					W := e.Value.(*LogGroup)
+					kv.DoReply(W,UpdateSnapshot)
+				}
+				for waitList.Len() > 0 {
+					waitList.Remove(waitList.Front())
+				}
+			}
 			kv.DecSnapshot(msg.Command.([]byte))
+			DPrintf("%d kvserver setup snapshot ",kv.me)
 			kv.mu.Unlock()
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -474,6 +487,15 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.mu.Lock()
+	snapshot := raft.Snapshot{kv.GenSnapshot(),kv.lastAppliedIndex,kv.lastAppliedTerm}
+	kv.rf.Lock()
+	kv.raftPersister.SaveStateAndSnapshot(kv.raftPersister.ReadRaftState(),snapshot.SnapshotData)
+	kv.rf.Unlock()
+	for key,value := range kv.data{
+		DPrintf("InKill %d key %s value [%s]",kv.me,key,value)
+	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) killed() bool {

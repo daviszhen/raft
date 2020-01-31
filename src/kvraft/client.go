@@ -81,7 +81,7 @@ func (ck *Clerk) Get(key string) string {
 		ck.lastLeader++
 		ck.lastLeader %= len(ck.servers)
 		ck.clientMutex.Unlock()
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return ""
 }
@@ -126,7 +126,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ck.lastLeader++
 		ck.lastLeader %= len(ck.servers)
 		ck.clientMutex.Unlock()
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return 
 }

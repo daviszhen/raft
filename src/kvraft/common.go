@@ -9,6 +9,7 @@ const (
 	ClientsOnSameIndex = "ClientsOnSameIndex"
 	Outdated       = "Outdated"
 	RpcTimeout     = "RpcTimeout"
+	UpdateSnapshot = "UpdateSnapshot"
 )
 
 type Err string
