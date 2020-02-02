@@ -118,7 +118,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	cmd := Op{args.Client,args.ReqNumber,GET,args.Key,""}
 	//DPrintf("Get call raft")
 	index,term,isLeader := kv.rf.Start(cmd)
-	DPrintf("Get call raft done %d %d ",index,term)
+	DPrintf("%d Get call raft done %d %d ",kv.me,index,term)
 	if isLeader == false || index == -1 || term == -1{
 		reply.Err = ErrWrongLeader
 		return
@@ -301,18 +301,22 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 				kv.lastAppliedTerm = msg.CommandTerm
 
 				if dup { 
-					DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value %s",
-					kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value)
+					var choice string
 					if  cmd .OpType == GET {
 						value,ok := kv.data[cmd.Key ] 
 						if !ok{
 							kv.DoReply(finalWait,ErrNoKey)
+							choice = ErrNoKey
 						}else{
 							kv.DoReplyValue(finalWait,OK,value)
+							choice = OK
 						} 
 					}else{ 
 						kv.DoReply(finalWait,Duplicate)
+						choice = Duplicate
 					}
+					DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value [%s] choice %s",
+					kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value,choice)
 				}else{
 					if  cmd .OpType == GET{
 						value,ok := kv.data[cmd.Key]
@@ -362,7 +366,7 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 			//TODO: update the lastest snapshot from leader
 			kv.mu.Lock()
 			for _,waitList := range kv.wait{
-				for e := waitList.Front();e!= nil;{
+				for e := waitList.Front();e!= nil;e=e.Next(){
 					W := e.Value.(*LogGroup)
 					kv.DoReply(W,UpdateSnapshot)
 				}
@@ -458,12 +462,14 @@ func (kv *KVServer) SnapshotRoutine() {
 		//DPrintf("SnapshotRoutine running")
 		kv.mu.Lock()
 		if kv.maxraftstate > 0 && kv.raftPersister.RaftStateSize() >= (kv.maxraftstate * 7) / 10 {
+			kv.rf.Lock()
 			//encode snapshot
 			snapshot := raft.Snapshot{kv.GenSnapshot(),kv.lastAppliedIndex,kv.lastAppliedTerm}
-			DPrintf("%d kvServer snapdata addr %p",kv.me,snapshot.SnapshotData)
-			kv.mu.Unlock()	
 			//require Raft to install snapshot
 			kv.rf.AddSnapshot(snapshot)
+			kv.rf.Unlock()
+			DPrintf("%d kvServer snapdata addr %p",kv.me,snapshot.SnapshotData)
+			kv.mu.Unlock()	
 		}else{
 			kv.mu.Unlock()
 		}

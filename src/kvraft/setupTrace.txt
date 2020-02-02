@@ -1,0 +1,22 @@
+/*
+import (
+    "os"
+    "runtime/trace"
+)
+*/
+
+//for tarce 
+/*
+traceFile, err := os.Create("trace.out")	
+if err != nil {		
+	panic(err)
+}
+trace.Start(traceFile)
+//for trace
+go func(){
+	time.Sleep(time.Duration(40*1000) * time.Millisecond)
+	trace.Stop()
+	DPrintf("trace done!")
+	panic("trace done")
+}()
+*/

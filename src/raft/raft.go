@@ -219,7 +219,7 @@ type Raft struct {
 }
 
 func (rf *Raft) InitRaft(peerCnt int) {
-	DPrintf("Init Raft.")
+	DPrintf("Init Raft %d.",rf.me)
 	atomic.StoreInt32(&rf.dead, 0)
 	rf.CurrentTerm = 0
 	rf.VotedFor = -1
@@ -308,8 +308,8 @@ func (rf *Raft) InitRaft(peerCnt int) {
 		rf.peerAeReqAcking[i] = false
 		rf.peerAeReqSendTime[i] = time.Now()
 	}
-	rf.peerAeReqSendedCountInOneRPC = 5
-	rf.peerAeReqSendMaxInterval = int64(rf.heartbeatTimeout / 5)
+	rf.peerAeReqSendedCountInOneRPC = 100
+	rf.peerAeReqSendMaxInterval = int64(rf.heartbeatTimeout / 10)
 
 	//init peer InstallSnapshot sender routine
 	rf.peerIsReqs = make([]*list.List, peerCnt)
@@ -325,7 +325,7 @@ func (rf *Raft) InitRaft(peerCnt int) {
 		rf.peerIsReqAcking[i] = false
 		rf.peerIsReqSendTime[i] = time.Now()
 	}
-	rf.peerIsReqSendMaxInterval = int64(rf.heartbeatTimeout / 5)
+	rf.peerIsReqSendMaxInterval = int64(rf.heartbeatTimeout / 10)
 
 	rf.snapshotInstalling = list.New()
 	rf.snapshotCondition = sync.NewCond(&rf.snapshotMutex)
@@ -403,36 +403,36 @@ func (rf *Raft) LogDeleteAtBegin(N int){
 }
 
 func (rf *Raft) AddSnapshot(snap Snapshot){
-	rf.snapshotMutex.Lock()
-	rf.snapshotInstalling.PushBack(snap)
-	rf.snapshotCondition.Wait()
-	rf.snapshotMutex.Unlock()
-	/*
-	//安装快照
-	rf.Lock()
+	//rf.snapshotMutex.Lock()
+	//rf.snapshotInstalling.PushBack(snap)
+	//rf.snapshotCondition.Wait()
+	//rf.snapshotMutex.Unlock()
+	
+	//安装快照，需要在互斥下安装
+	//rf.Lock()
 	if snap.LastAppliedIndex > rf.LastIncludedIndex {
-		if (snap.LastAppliedIndex <= (rf.LogLength()-1)){
-			N:= rf.LogCountFromBegin(snap.LastAppliedIndex)
-			rf.LogDeleteAtBegin(N)
-		}else{
-			N:= rf.LogCountFromBegin(rf.LogLength()-1)
-			rf.LogDeleteAtBegin(N)
-		}
-		rf.LastIncludedIndex = snap.LastAppliedIndex
-		rf.LastIncludedTerm = snap.LastAppliedTerm
-		rf.commitIndex = Max(rf.commitIndex,rf.LastIncludedIndex)
-		rf.lastApplied = Max(rf.lastApplied,rf.LastIncludedIndex)
-		//rf.commitIndex = Min(rf.commitIndex,rf.LogLength()-1)
-		//rf.lastApplied = Min(rf.lastApplied,rf.LogLength()-1)
-		DPrintf("%d Follower LastIncludedIndex %d LastIncludedTerm %d commitIndex %d lastApplied %d",
-			rf.me,rf.LastIncludedIndex,rf.LastIncludedTerm,rf.commitIndex,rf.lastApplied)
-		rf.currentSnapshot = snap
-		rf.persist()
-		rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
-		DPrintf("%d raft addr %p,snapdata addr %p",rf.me,rf.persister.ReadRaftState(),snap.SnapshotData)
+		prevRaftSize := rf.persister.RaftStateSize()
+			if (snap.LastAppliedIndex <= (rf.LogLength()-1)){
+				N:= rf.LogCountFromBegin(snap.LastAppliedIndex)
+				rf.LogDeleteAtBegin(N)
+			}else{
+				N:= rf.LogCountFromBegin(rf.LogLength()-1)
+				rf.LogDeleteAtBegin(N)
+			}
+			rf.LastIncludedIndex = snap.LastAppliedIndex
+			rf.LastIncludedTerm = snap.LastAppliedTerm
+			rf.commitIndex = Max(rf.commitIndex,rf.LastIncludedIndex)
+			rf.lastApplied = Max(rf.lastApplied,rf.LastIncludedIndex)
+			DPrintf("%d Follower setSnapshot LastIncludedIndex %d LastIncludedTerm %d commitIndex %d lastApplied %d",
+				rf.me,rf.LastIncludedIndex,rf.LastIncludedTerm,rf.commitIndex,rf.lastApplied)
+			rf.currentSnapshot = snap
+			rf.persist()
+			rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),snap.SnapshotData)
+			rf.snapshotChanged = true
+			DPrintf("%d raft addr %p raft size {%d -> %d},snapdata addr %p",rf.me,rf.persister.ReadRaftState(),prevRaftSize,rf.persister.RaftStateSize(),snap.SnapshotData)
 	}
-	rf.Unlock()
-	*/
+	//rf.Unlock()
+	
 }
 
 //destroy Raft
@@ -1771,6 +1771,23 @@ func (rf *Raft) ApplyMsgRoutine() {
 		
 		time.Sleep(1 * time.Millisecond)
 	}
+	rf.applyMsgMutex.Lock() 
+	for rf.applyMsgs.Len() > 0{
+		msg := rf.applyMsgs.Front().Value.(*ApplyMsg)
+		rf.applyMsgs.Remove(rf.applyMsgs.Front())
+		if msg.CommandValid{
+			if msg.CommandIndex > rf.LastIncludedIndex{
+				rf.applyCh <- *msg
+				DPrintf("%d apply Entry[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
+			}else{
+				DPrintf("%d drop apllied msg CommandIndex %d LastIncludedIndex %d",rf.me,msg.CommandIndex,rf.LastIncludedIndex)
+			}
+		}else{
+			rf.applyCh <- *msg
+			DPrintf("%d apply Snapshot[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
+		}
+	}
+	rf.applyMsgMutex.Unlock()
 }
 
 // return currentTerm and whether this server
@@ -1889,7 +1906,7 @@ func (rf *Raft) PersistStateRoutine() {
 		}
 		rf.Unlock()
 
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -2112,7 +2129,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	DPrintf("Kill Raft")
+	DPrintf("Kill Raft %d",rf.me)
 	rf.Lock()
 	rf.persist()
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),rf.currentSnapshot.SnapshotData)
