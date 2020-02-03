@@ -1,0 +1,2 @@
+# raft
+The consensus algorithm
