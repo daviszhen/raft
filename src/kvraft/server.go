@@ -5,7 +5,7 @@ import (
 	"labgob"
 	"labrpc"
 	"log"
-	"../raft"
+	"raft"
 	"sync"
 	"sync/atomic"
 	"time"
