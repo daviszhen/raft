@@ -6,8 +6,10 @@ package main
 //
 // go run mrmaster.go pg*.txt
 //
+// Please do not change this file.
+//
 
-import "mr"
+import "../mr"
 import "time"
 import "os"
 import "fmt"
