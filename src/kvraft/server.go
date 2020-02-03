@@ -307,16 +307,22 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 						if !ok{
 							kv.DoReply(finalWait,ErrNoKey)
 							choice = ErrNoKey
+							DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value [%s] choice %s",
+							kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,value,choice)
 						}else{
 							kv.DoReplyValue(finalWait,OK,value)
 							choice = OK
+							DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value [%s] choice %s",
+							kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,kv.data[cmd.Key],choice)
 						} 
+						
 					}else{ 
 						kv.DoReply(finalWait,Duplicate)
 						choice = Duplicate
+						DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value [%s] choice %s",
+							kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value,choice)
 					}
-					DPrintf("%d Dup apply msg :client %d prevReqNumber %d reqNo %d optype %d key %s value [%s] choice %s",
-					kv.me,cmd.Client,prevReqNumber,cmd.ReqNumber,cmd.OpType,cmd.Key,cmd.Value,choice)
+					
 				}else{
 					if  cmd .OpType == GET{
 						value,ok := kv.data[cmd.Key]
@@ -365,17 +371,27 @@ func (kv *KVServer)ApplyStateMachineRoutine(){
 		}else{
 			//TODO: update the lastest snapshot from leader
 			kv.mu.Lock()
-			for _,waitList := range kv.wait{
-				for e := waitList.Front();e!= nil;e=e.Next(){
-					W := e.Value.(*LogGroup)
-					kv.DoReply(W,UpdateSnapshot)
+			if msg.CommandIndex > kv.lastAppliedIndex {
+				for _,waitList := range kv.wait{
+					for e := waitList.Front();e!= nil;e=e.Next(){
+						W := e.Value.(*LogGroup)
+						kv.DoReply(W,UpdateSnapshot)
+					}
+					for waitList.Len() > 0 {
+						waitList.Remove(waitList.Front())
+					}
 				}
-				for waitList.Len() > 0 {
-					waitList.Remove(waitList.Front())
-				}
+				kv.DecSnapshot(msg.Command.([]byte))
+				kv.rf.Lock()
+				//encode snapshot
+				snapshot := raft.Snapshot{msg.Command.([]byte),msg.CommandIndex,msg.CommandTerm}
+				//require Raft to install snapshot
+				kv.rf.AddSnapshot(snapshot)
+				kv.rf.Unlock()
+				DPrintf("%d kvserver setup snapshot from leader, snapdata addr %p ",kv.me,snapshot.SnapshotData)
+			}else{
+				DPrintf("%d kvserver drop outdated snapshot ",kv.me)
 			}
-			kv.DecSnapshot(msg.Command.([]byte))
-			DPrintf("%d kvserver setup snapshot ",kv.me)
 			kv.mu.Unlock()
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -498,6 +514,8 @@ func (kv *KVServer) Kill() {
 	kv.rf.Lock()
 	kv.raftPersister.SaveStateAndSnapshot(kv.raftPersister.ReadRaftState(),snapshot.SnapshotData)
 	kv.rf.Unlock()
+	DPrintf("raft LastIncludedIndex %d lastApplied %d kvserver lastAppliedIndex %d",
+		kv.rf.LastIncludedIndex,kv.rf.GetLastApplied(),kv.lastAppliedIndex)
 	for key,value := range kv.data{
 		DPrintf("InKill %d key %s value [%s]",kv.me,key,value)
 	}

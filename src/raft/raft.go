@@ -357,6 +357,10 @@ func (rf *Raft) EnableRaft(peerCnt int) {
 	go rf.PeerMainRoutine()	
 }
 
+func (rf *Raft) GetLastApplied()int{
+	return rf.lastApplied
+}
+
 func (rf *Raft) LogLength()int{
 	return rf.LastIncludedIndex+1 + len(rf.Log)
 }
@@ -806,7 +810,9 @@ func (rf *Raft) FollowerRoutine() bool {
 			rf.ResetElectionTimer()
 			req.reply.Term = rf.CurrentTerm
 			//TODO:fix logic
-			if req.args.LastIncludedIndex > rf.LastIncludedIndex {
+			//比LastIncludedIndex和lastApplied都大的快照才值得安装
+			if req.args.LastIncludedIndex > rf.LastIncludedIndex{
+				/*
 				if ((req.args.LastIncludedIndex <= (rf.LogLength()-1)) && 
 						rf.LogAt(req.args.LastIncludedIndex).Index == req.args.LastIncludedIndex) &&
 						(rf.LogAt(req.args.LastIncludedIndex).Term == req.args.LastIncludedTerm){
@@ -816,35 +822,42 @@ func (rf *Raft) FollowerRoutine() bool {
 					N:= rf.LogCountFromBegin(rf.LogLength()-1)
 					rf.LogDeleteAtBegin(N)
 				}
+				*/
 
 				//安装snapshot from leader
-				rf.LastIncludedIndex = req.args.LastIncludedIndex
-				rf.LastIncludedTerm = req.args.LastIncludedTerm
+				//rf.LastIncludedIndex = req.args.LastIncludedIndex
+				//rf.LastIncludedTerm = req.args.LastIncludedTerm
 				//更新Log的索引
-				rf.commitIndex = Max(rf.commitIndex,rf.LastIncludedIndex)
-				rf.lastApplied = Max(rf.lastApplied,rf.LastIncludedIndex)
-				rf.commitIndex = Min(rf.commitIndex,rf.LogLength()-1)
-				rf.lastApplied = Min(rf.lastApplied,rf.LogLength()-1)
+				//rf.commitIndex = rf.LastIncludedIndex
+				//rf.lastApplied = rf.LastIncludedIndex
+				//rf.commitIndex = Max(rf.commitIndex,rf.LastIncludedIndex)
+				//rf.lastApplied = Max(rf.lastApplied,rf.LastIncludedIndex)
+				//rf.commitIndex = Min(rf.commitIndex,rf.LogLength()-1)
+				//rf.lastApplied = Min(rf.lastApplied,rf.LogLength()-1)
 				
 				DPrintf("%d Follower get InstallSnapshot LastIncludedIndex %d LastIncludedTerm %d commitIndex %d lastApplied %d lastLogIndex %d",
 					rf.me,rf.LastIncludedIndex,rf.LastIncludedTerm,rf.commitIndex,rf.lastApplied,rf.LogLength()-1)
 
 				//在这里持久化，不是好办法
-				rf.currentSnapshot.SnapshotData = req.args.Data
-				rf.persist()
-				rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),req.args.Data)
+				//rf.currentSnapshot.SnapshotData = req.args.Data
+				//rf.persist()
+				//rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(),req.args.Data)
 
 				//将来自leader的状态机数据传给kvserver。
 				msg := new(ApplyMsg)
 				msg.CommandValid = false
 				msg.Command = make([]byte,len(req.args.Data))
 				copy(msg.Command.([]byte),req.args.Data)
-				msg.CommandIndex = -1
-				msg.CommandTerm = -1
+				//方便kvserver端判断snapshot是否过时。不是协议规定
+				msg.CommandIndex = req.args.LastIncludedIndex
+				msg.CommandTerm = req.args.LastIncludedTerm
 				rf.applyMsgMutex.Lock()
 				rf.applyMsgs.PushBack(msg)
 				rf.applyMsgMutex.Unlock()
 				rf.applyMsgCondition.Signal()
+			}else{
+				DPrintf("%d Follower drop outdated InstallSnapshot LastIncludedIndex %d LastIncludedTerm %d commitIndex %d lastApplied %d lastLogIndex %d",
+					rf.me,rf.LastIncludedIndex,rf.LastIncludedTerm,rf.commitIndex,rf.lastApplied,rf.LogLength()-1)
 			}
 			
 			rf.isReqDone = true
@@ -1765,8 +1778,12 @@ func (rf *Raft) ApplyMsgRoutine() {
 				DPrintf("%d drop apllied msg CommandIndex %d LastIncludedIndex %d",rf.me,msg.CommandIndex,rf.LastIncludedIndex)
 			}
 		}else{
-			rf.applyCh <- *msg
-			DPrintf("%d apply Snapshot[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)
+			if msg.CommandIndex > rf.LastIncludedIndex{
+				rf.applyCh <- *msg
+				DPrintf("%d apply Snapshot[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)	
+			}else{
+				DPrintf("%d drop outdated Snapshot[index %d value %d]",rf.me,msg.CommandIndex,msg.Command)	
+			}
 		}
 		
 		time.Sleep(1 * time.Millisecond)
