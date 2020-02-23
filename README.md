@@ -20,6 +20,9 @@ As mentioned above, the code has passed lab2 and lab3 tests in MIT6.824 course. 
 - linearizable client interaction even the session expire.
 - formal verification for correctness
 
+## The implementation details
+https://github.com/daviszhen/raft/wiki
+
 ## Run the code
 - making sure that go version is newer than or equal to go1.13.5
 - set the GOPATH as the parent of src directory
